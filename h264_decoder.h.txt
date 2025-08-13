@@ -1,0 +1,44 @@
+#ifndef H264_DECODER_H
+#define H264_DECODER_H
+
+#include "h264_ps.h"
+#include "h264_slice.h"
+#include <pthread.h>
+#include <stdio.h>
+
+// Структура кадра
+typedef struct {
+    uint8_t* luma;       // Яркость (Y)
+    uint8_t* chroma_cb;  // Хрома Cb
+    uint8_t* chroma_cr;  // Хрома Cr
+    int width;           // Ширина кадра
+    int height;          // Высота кадра
+    int ref_count;       // Счётчик референсов
+} H264Frame;
+
+// Структура декодера
+typedef struct {
+    H264SPS* sps;        // Параметры последовательности
+    H264PPS* pps;        // Параметры изображения
+    H264Frame* frames[16]; // Список референсных кадров
+    int frame_count;     // Количество референсных кадров
+    FILE* input;         // Входной файл
+    FILE* output;        // Выходной файл
+    pthread_mutex_t mutex; // Мьютекс для потокобезопасности
+    int log_level;       // Уровень логирования
+    FILE* log_file;      // Файл логов
+} H264Decoder;
+
+// Инициализация декодера
+int h264_decoder_init(H264Decoder* decoder, FILE* input, FILE* output);
+
+// Освобождение ресурсов декодера
+void h264_decoder_free(H264Decoder* decoder);
+
+// Декодирование кадра
+int h264_decode_frame(H264Decoder* decoder, int frame_number);
+
+// Чтение NAL-юнита
+int h264_read_nal_unit(FILE* input, uint8_t* buffer, int max_size);
+
+#endif

@@ -1,0 +1,17 @@
+#ifndef IMAGE_WRITER_H
+#define IMAGE_WRITER_H
+
+#include "h264_decoder.h"
+#include <stdio.h>
+
+// Форматы вывода
+typedef enum {
+    IMAGE_FORMAT_BMP,
+    IMAGE_FORMAT_PNG,
+    IMAGE_FORMAT_JPEG
+} ImageFormat;
+
+// Сохранение кадра в указанный формат
+int save_frame_to_image(const H264Frame* frame, FILE* output, ImageFormat format, H264Decoder* decoder);
+
+#endif

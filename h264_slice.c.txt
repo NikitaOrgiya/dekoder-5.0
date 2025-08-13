@@ -1,0 +1,149 @@
+#include <stdio.h>
+#include <string.h>
+#include "h264_slice.h"
+#include "h264_error.h"
+#include "h264_decoder.h"
+#include "h264_bitstream.h"
+#include <stdlib.h>
+#include <emmintrin.h>
+
+// Инициализация среза
+int h264_slice_init(H264Slice* slice) {
+    if (!slice) return H264_ERROR_INVALID_PARAM;
+    memset(slice, 0, sizeof(H264Slice));
+    slice->mbs = NULL;
+    slice->num_mbs = 0;
+    slice->ref_count = 0;
+    slice->field_pic_flag = 0;
+    slice->bottom_field_flag = 0;
+    slice->ref_pic_list_modification_flag_l0 = 0;
+    slice->ref_pic_list_modification_flag_l1 = 0;
+    return H264_OK;
+}
+
+// Освобождение среза
+void h264_slice_free(H264Slice* slice) {
+    if (!slice) return;
+    if (slice->mbs) {
+        free(slice->mbs);
+        slice->mbs = NULL;
+    }
+    slice->num_mbs = 0;
+}
+
+// Парсинг заголовка среза
+int h264_slice_header_parse(H264Slice* slice, const uint8_t* data, int size, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "h264_slice_header_parse start");
+    if (!slice || !data || size <= 0 || !decoder) {
+        LOG(decoder, LOG_ERROR, "invalid params");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    h264_slice_init(slice);
+    
+    pthread_mutex_lock(&decoder->mutex);
+    slice->sps = decoder->sps;
+    slice->pps = decoder->pps;
+    slice->ref_count = decoder->frame_count;
+    for (int i = 0; i < decoder->frame_count; i++) {
+        slice->ref_frames[i] = decoder->frames[i];
+    }
+    pthread_mutex_unlock(&decoder->mutex);
+    
+    if (!slice->sps) {
+        LOG(decoder, LOG_ERROR, "no SPS available");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    H264Bitstream bs;
+    h264_bs_init(&bs, data, size);
+    h264_bs_skip_emulation_prevention(&bs);
+    slice->first_mb_in_slice = h264_bs_read_ue(&bs);
+    int slice_type = h264_bs_read_ue(&bs);
+    slice->type = (SliceType)(slice_type % 5);
+    int pic_parameter_set_id = h264_bs_read_ue(&bs);
+    if (!slice->pps || slice->pps->pic_parameter_set_id != pic_parameter_set_id) {
+        LOG(decoder, LOG_ERROR, "invalid PPS id=%d", pic_parameter_set_id);
+        return H264_ERROR_INVALID_PARAM;
+    }
+    slice->frame_num = h264_bs_read_bits(&bs, slice->sps->log2_max_frame_num_minus4 + 4);
+    slice->field_pic_flag = slice->sps->frame_mbs_only_flag ? 0 : h264_bs_read_bits(&bs, 1);
+    if (slice->field_pic_flag) {
+        slice->bottom_field_flag = h264_bs_read_bits(&bs, 1);
+    }
+    slice->slice_qp = 26 + h264_bs_read_se(&bs);
+    // Парсинг модификации списка референсных кадров
+    if (slice->type == SLICE_TYPE_P || slice->type == SLICE_TYPE_B) {
+        slice->ref_pic_list_modification_flag_l0 = h264_bs_read_bits(&bs, 1);
+        if (slice->ref_pic_list_modification_flag_l0) {
+            int modification_of_pic_nums_idc;
+            do {
+                modification_of_pic_nums_idc = h264_bs_read_ue(&bs);
+                if (modification_of_pic_nums_idc == 0 || modification_of_pic_nums_idc == 1) {
+                    h264_bs_read_ue(&bs); // abs_diff_pic_num_minus1
+                } else if (modification_of_pic_nums_idc == 2) {
+                    h264_bs_read_ue(&bs); // long_term_pic_num
+                }
+            } while (modification_of_pic_nums_idc != 3);
+        }
+        if (slice->type == SLICE_TYPE_B) {
+            slice->ref_pic_list_modification_flag_l1 = h264_bs_read_bits(&bs, 1);
+            if (slice->ref_pic_list_modification_flag_l1) {
+                int modification_of_pic_nums_idc;
+                do {
+                    modification_of_pic_nums_idc = h264_bs_read_ue(&bs);
+                    if (modification_of_pic_nums_idc == 0 || modification_of_pic_nums_idc == 1) {
+                        h264_bs_read_ue(&bs); // abs_diff_pic_num_minus1
+                    } else if (modification_of_pic_nums_idc == 2) {
+                        h264_bs_read_ue(&bs); // long_term_pic_num
+                    }
+                } while (modification_of_pic_nums_idc != 3);
+            }
+        }
+    }
+    LOG(decoder, LOG_INFO, "slice_type=%d, frame_num=%d, ref_count=%d", 
+        slice->type, slice->frame_num, slice->ref_count);
+    return H264_OK;
+}
+
+// Парсинг данных среза
+int h264_slice_data_parse(H264Slice* slice, const uint8_t* data, int size, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "h264_slice_data_parse start");
+    if (!slice || !data || size <= 0) {
+        LOG(decoder, LOG_ERROR, "invalid params");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    unsigned int width_in_mbs = slice->sps->pic_width_in_mbs_minus1 + 1;
+    unsigned int height_in_map_units = slice->sps->pic_height_in_map_units_minus1 + 1;
+    unsigned int frame_height_in_mbs = (2 - slice->sps->frame_mbs_only_flag) * height_in_map_units;
+    slice->num_mbs = width_in_mbs * frame_height_in_mbs;
+    if (slice->mbs) {
+        free(slice->mbs);
+    }
+    slice->mbs = (H264MB*)calloc(slice->num_mbs, sizeof(H264MB));
+    if (!slice->mbs) {
+        LOG(decoder, LOG_ERROR, "out of memory");
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+    H264Bitstream bs;
+    H264CABACContext cabac;
+    if (slice->pps->entropy_coding_mode_flag) {
+        h264_cabac_init(&cabac, data, size);
+    } else {
+        h264_bs_init(&bs, data, size);
+        h264_bs_skip_emulation_prevention(&bs);
+    }
+    for (unsigned int mb = 0; mb < slice->num_mbs; ++mb) {
+        h264_mb_init(&slice->mbs[mb]);
+        h264_decode_mb(&slice->mbs[mb], &bs, &cabac, slice, decoder);
+    }
+    if (slice->pps->entropy_coding_mode_flag) {
+        h264_cabac_free(&cabac);
+    }
+    return H264_OK;
+}
+
+// Декодирование среза
+int h264_decode_slice(H264Decoder* decoder, const uint8_t* data, int size, H264Slice* slice) {
+    int res = h264_slice_header_parse(slice, data, size, decoder);
+    if (res != H264_OK) return res;
+    return h264_slice_data_parse(slice, data, size, decoder);
+}

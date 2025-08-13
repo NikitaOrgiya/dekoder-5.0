@@ -1,0 +1,21 @@
+#ifndef H264_ERROR_H
+#define H264_ERROR_H
+
+// Коды ошибок
+enum {
+    H264_OK = 0,
+    H264_ERROR_INVALID_PARAM = -1,
+    H264_ERROR_OUT_OF_MEMORY = -2,
+    H264_ERROR_INVALID_STREAM = -3,
+    H264_ERROR_WRITE_FAILED = -4,
+    H264_ERROR_INVALID_REFERENCE = -5
+};
+
+// Уровни логирования
+enum {
+    LOG_ERROR = 1,
+    LOG_INFO = 2,
+    LOG_DEBUG = 3
+};
+
+#endif

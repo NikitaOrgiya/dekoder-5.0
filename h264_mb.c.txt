@@ -1,0 +1,56 @@
+#include "h264_mb.h"
+#include "h264_error.h"
+#include "h264_decoder.h"
+#include <string.h>
+#include <emmintrin.h>
+
+// Инициализация макроблока
+void h264_mb_init(H264MB* mb) {
+    if (!mb) return;
+    mb->type = MB_TYPE_I;
+    memset(mb->coeffs, 0, sizeof(mb->coeffs));
+    memset(mb->chroma_cb_coeffs, 0, sizeof(mb->chroma_cb_coeffs));
+    memset(mb->chroma_cr_coeffs, 0, sizeof(mb->chroma_cr_coeffs));
+}
+
+// Освобождение макроблока
+void h264_mb_free(H264MB* mb) {
+    if (!mb) return;
+    memset(mb, 0, sizeof(H264MB));
+}
+
+// Инициализация CABAC
+void h264_cabac_init(H264CABACContext* cabac, const uint8_t* data, int size) {
+    cabac->range = 510;
+    cabac->offset = 0;
+    cabac->ctx = (uint8_t*)calloc(1024, sizeof(uint8_t));
+}
+
+// Освобождение CABAC
+void h264_cabac_free(H264CABACContext* cabac) {
+    if (cabac->ctx) free(cabac->ctx);
+}
+
+// Декодирование макроблока (упрощённая версия)
+int h264_decode_mb(H264MB* mb, H264Bitstream* bs, H264CABACContext* cabac, H264Slice* slice, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "h264_decode_mb start");
+    if (!mb || !slice || !decoder) return H264_ERROR_INVALID_PARAM;
+    
+    // Определение типа макроблока
+    mb->type = slice->type == SLICE_TYPE_I ? MB_TYPE_I : (slice->type == SLICE_TYPE_P ? MB_TYPE_P : MB_TYPE_B);
+    
+    // Декодирование коэффициентов (упрощённо)
+    int size = slice->sps->chroma_format_idc == 3 ? 16 : 8;
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 16; j++) {
+            mb->coeffs[i][j] = slice->pps->entropy_coding_mode_flag ? 0 : h264_bs_read_se(bs);
+        }
+    }
+    for (int i = 0; i < size; i++) {
+        for (int j = 0; j < size; j++) {
+            mb->chroma_cb_coeffs[i][j] = slice->pps->entropy_coding_mode_flag ? 0 : h264_bs_read_se(bs);
+            mb->chroma_cr_coeffs[i][j] = slice->pps->entropy_coding_mode_flag ? 0 : h264_bs_read_se(bs);
+        }
+    }
+    return H264_OK;
+}

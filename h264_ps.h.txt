@@ -1,0 +1,63 @@
+#ifndef H264_PS_H
+#define H264_PS_H
+
+#include <stdint.h>
+
+// Структура для VUI (Video Usability Information)
+typedef struct {
+    unsigned int aspect_ratio_info_present_flag; // Флаг соотношения сторон
+    unsigned int aspect_ratio_idc;              // Код соотношения сторон
+    unsigned int sar_width;                     // Ширина соотношения
+    unsigned int sar_height;                    // Высота соотношения
+    unsigned int timing_info_present_flag;      // Флаг тайминга
+    unsigned int num_units_in_tick;             // Единицы времени
+    unsigned int time_scale;                    // Масштаб времени
+    unsigned int fixed_frame_rate_flag;         // Флаг фиксированной частоты
+    unsigned int colour_description_present_flag; // Флаг цветового описания
+    unsigned int colour_primaries;              // Основные цвета
+    unsigned int transfer_characteristics;      // Характеристики передачи
+    unsigned int matrix_coefficients;           // Коэффициенты матрицы
+} H264VUI;
+
+// Структура SPS (Sequence Parameter Set)
+typedef struct {
+    unsigned int profile_idc;                   // Профиль H.264
+    unsigned int level_idc;                     // Уровень профиля
+    unsigned int seq_parameter_set_id;          // ID набора параметров
+    unsigned int chroma_format_idc;             // Формат хромы (4:2:0, 4:2:2, 4:4:4)
+    unsigned int log2_max_frame_num_minus4;     // Логарифм числа кадров
+    unsigned int pic_order_cnt_type;            // Тип счёта порядка кадров
+    unsigned int log2_max_pic_order_cnt_lsb_minus4; // Логарифм порядка кадров
+    unsigned int max_num_ref_frames;            // Максимум референсных кадров
+    unsigned int pic_width_in_mbs_minus1;       // Ширина в макроблоках
+    unsigned int pic_height_in_map_units_minus1; // Высота в единицах карты
+    unsigned int frame_mbs_only_flag;           // Флаг только кадров
+    unsigned int mb_adaptive_frame_field_flag;  // Адаптивный флаг кадр/поле
+    H264VUI vui;                                // VUI параметры
+} H264SPS;
+
+// Структура PPS (Picture Parameter Set)
+typedef struct {
+    unsigned int pic_parameter_set_id;          // ID набора параметров
+    unsigned int seq_parameter_set_id;          // ID связанного SPS
+    unsigned int entropy_coding_mode_flag;      // Флаг кодирования (CAVLC/CABAC)
+    unsigned int pic_order_present_flag;        // Флаг порядка изображения
+    unsigned int num_ref_idx_l0_default_active_minus1; // Количество референсов L0
+    unsigned int num_ref_idx_l1_default_active_minus1; // Количество референсов L1
+    unsigned int weighted_pred_flag;            // Флаг взвешенного предсказания
+    unsigned int weighted_bipred_idc;           // ID взвешенного предсказания
+    int pic_init_qp_minus26;                   // Начальный QP
+    int pic_init_qs_minus26;                   // Начальный QS
+    int chroma_qp_index_offset;                // Смещение QP хромы
+} H264PPS;
+
+// Инициализация и освобождение SPS/PPS
+void h264_sps_init(H264SPS* sps);
+void h264_sps_free(H264SPS* sps);
+int h264_decode_sps(H264Decoder* decoder, const uint8_t* data, int size);
+
+void h264_pps_init(H264PPS* pps);
+void h264_pps_free(H264PPS* pps);
+int h264_decode_pps(H264Decoder* decoder, const uint8_t* data, int size);
+
+#endif

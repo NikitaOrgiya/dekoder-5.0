@@ -1,0 +1,161 @@
+#include "h264_decoder.h"
+#include "h264_bitstream.h"
+#include "h264_error.h"
+#include "h264_ps.h"
+#include "h264_slice.h"
+#include "image_writer.h"
+#include <stdlib.h>
+#include <string.h>
+
+// Макрос для логирования
+#define LOG(decoder, level, fmt, ...) \
+    if (decoder->log_level >= level) { \
+        fprintf(decoder->log_file ? decoder->log_file : stderr, fmt "\n", ##__VA_ARGS__); \
+    }
+
+// Инициализация декодера
+int h264_decoder_init(H264Decoder* decoder, FILE* input, FILE* output) {
+    if (!decoder || !input || !output) return H264_ERROR_INVALID_PARAM;
+    memset(decoder, 0, sizeof(H264Decoder));
+    decoder->input = input;
+    decoder->output = output;
+    decoder->log_level = LOG_INFO; // Уровень логов по умолчанию
+    decoder->log_file = stderr;    // Логи по умолчанию в stderr
+    pthread_mutex_init(&decoder->mutex, NULL);
+    return H264_OK;
+}
+
+// Освобождение ресурсов декодера
+void h264_decoder_free(H264Decoder* decoder) {
+    if (!decoder) return;
+    pthread_mutex_lock(&decoder->mutex);
+    if (decoder->sps) {
+        h264_sps_free(decoder->sps);
+        free(decoder->sps);
+    }
+    if (decoder->pps) {
+        h264_pps_free(decoder->pps);
+        free(decoder->pps);
+    }
+    for (int i = 0; i < decoder->frame_count; i++) {
+        if (decoder->frames[i]) {
+            free(decoder->frames[i]->luma);
+            free(decoder->frames[i]->chroma_cb);
+            free(decoder->frames[i]->chroma_cr);
+            free(decoder->frames[i]);
+            decoder->frames[i] = NULL;
+        }
+    }
+    pthread_mutex_unlock(&decoder->mutex);
+    pthread_mutex_destroy(&decoder->mutex);
+}
+
+// Чтение NAL-юнита из потока
+int h264_read_nal_unit(FILE* input, uint8_t* buffer, int max_size) {
+    int pos = 0;
+    int state = 0; // Состояние поиска стартового кода
+    int byte;
+    while (pos < max_size && (byte = fgetc(input)) != EOF) {
+        buffer[pos++] = (uint8_t)byte;
+        if (byte == 0) {
+            state++;
+        } else if (byte == 1 && state >= 2) {
+            pos -= state + 1;
+            if (pos > 0) {
+                fseek(input, -(state + 1), SEEK_CUR);
+                return pos;
+            }
+            state = 0;
+        } else {
+            state = (byte == 0) ? state + 1 : 0;
+        }
+    }
+    return pos > 0 ? pos : 0;
+}
+
+// Декодирование кадра
+int h264_decode_frame(H264Decoder* decoder, int frame_number) {
+    if (!decoder || !decoder->input || !decoder->output) {
+        LOG(decoder, LOG_ERROR, "invalid params");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    uint8_t buffer[1024 * 1024]; // Буфер 1MB
+    int read_size = 0;
+    int current_frame = -1;
+    H264Frame* frame = NULL;
+    while ((read_size = h264_read_nal_unit(decoder->input, buffer, sizeof(buffer))) > 0) {
+        int nal_unit_type = (buffer[0] & 0x1F);
+        LOG(decoder, LOG_INFO, "NAL unit type=%d, size=%d", nal_unit_type, read_size);
+        if (nal_unit_type == 7) { // SPS
+            if (h264_decode_sps(decoder, buffer + 1, read_size - 1) != H264_OK) {
+                LOG(decoder, LOG_ERROR, "failed to decode SPS");
+                return H264_ERROR_INVALID_STREAM;
+            }
+        } else if (nal_unit_type == 8) { // PPS
+            if (h264_decode_pps(decoder, buffer + 1, read_size - 1) != H264_OK) {
+                LOG(decoder, LOG_ERROR, "failed to decode PPS");
+                return H264_ERROR_INVALID_STREAM;
+            }
+        } else if (nal_unit_type == 5 || nal_unit_type == 1) { // IDR или non-IDR slice
+            current_frame++;
+            if (current_frame == frame_number) {
+                H264Slice slice;
+                if (h264_decode_slice(decoder, buffer + 1, read_size - 1, &slice) != H264_OK) {
+                    LOG(decoder, LOG_ERROR, "failed to decode slice");
+                    return H264_ERROR_INVALID_STREAM;
+                }
+                frame = (H264Frame*)malloc(sizeof(H264Frame));
+                frame->width = (decoder->sps->pic_width_in_mbs_minus1 + 1) * 16;
+                frame->height = (decoder->sps->pic_height_in_map_units_minus1 + 1) * 16 * (2 - decoder->sps->frame_mbs_only_flag);
+                int chroma_width = frame->width / (decoder->sps->chroma_format_idc == 1 || decoder->sps->chroma_format_idc == 2 ? 2 : 1);
+                int chroma_height = frame->height / (decoder->sps->chroma_format_idc == 1 ? 2 : 1);
+                frame->luma = (uint8_t*)calloc(frame->width * frame->height, sizeof(uint8_t));
+                frame->chroma_cb = (uint8_t*)calloc(chroma_width * chroma_height, sizeof(uint8_t));
+                frame->chroma_cr = (uint8_t*)calloc(chroma_width * chroma_height, sizeof(uint8_t));
+                frame->ref_count = 0;
+                // Копирование данных из среза
+                for (unsigned int i = 0; i < slice.num_mbs; i++) {
+                    int mb_x = (i % (decoder->sps->pic_width_in_mbs_minus1 + 1)) * 16;
+                    int mb_y = (i / (decoder->sps->pic_width_in_mbs_minus1 + 1)) * 16;
+                    for (int j = 0; j < 16; j++) {
+                        for (int k = 0; k < 16; k++) {
+                            frame->luma[(mb_y + j) * frame->width + mb_x + k] = slice.mbs[i].coeffs[j][k];
+                        }
+                    }
+                    for (int j = 0; j < (decoder->sps->chroma_format_idc == 3 ? 16 : 8); j++) {
+                        for (int k = 0; k < (decoder->sps->chroma_format_idc == 3 ? 16 : 8); k++) {
+                            frame->chroma_cb[(mb_y / (decoder->sps->chroma_format_idc == 1 ? 2 : 1) + j) * chroma_width + mb_x / (decoder->sps->chroma_format_idc == 1 || decoder->sps->chroma_format_idc == 2 ? 2 : 1) + k] = slice.mbs[i].chroma_cb_coeffs[j][k];
+                            frame->chroma_cr[(mb_y / (decoder->sps->chroma_format_idc == 1 ? 2 : 1) + j) * chroma_width + mb_x / (decoder->sps->chroma_format_idc == 1 || decoder->sps->chroma_format_idc == 2 ? 2 : 1) + k] = slice.mbs[i].chroma_cr_coeffs[j][k];
+                        }
+                    }
+                }
+                // Добавление кадра в список референсных
+                if (decoder->frame_count < 16) {
+                    decoder->frames[decoder->frame_count++] = frame;
+                } else {
+                    free(decoder->frames[0]->luma);
+                    free(decoder->frames[0]->chroma_cb);
+                    free(decoder->frames[0]->chroma_cr);
+                    free(decoder->frames[0]);
+                    for (int i = 1; i < decoder->frame_count; i++) {
+                        decoder->frames[i - 1] = decoder->frames[i];
+                    }
+                    decoder->frames[decoder->frame_count - 1] = frame;
+                }
+                h264_slice_free(&slice);
+                break;
+            }
+        }
+    }
+    if (frame) {
+        // Сохранение кадра (формат выбирается в main.c)
+        int res = save_frame_to_image(frame, decoder->output, IMAGE_FORMAT_PNG, decoder);
+        free(frame->luma);
+        free(frame->chroma_cb);
+        free(frame->chroma_cr);
+        free(frame);
+        return res;
+    }
+    LOG(decoder, LOG_ERROR, "frame %d not found", frame_number);
+    return H264_ERROR_INVALID_STREAM;
+}

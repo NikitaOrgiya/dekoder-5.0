@@ -1,0 +1,31 @@
+# Минимальная версия CMake
+cmake_minimum_required(VERSION 3.10)
+
+# Название проекта
+project(h264_decoder C)
+
+# Установка стандарта C11
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Флаги компиляции
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msse2 -pthread")
+
+# Поиск библиотек
+find_package(PNG REQUIRED)
+find_package(JPEG REQUIRED)
+
+# Создание исполняемого файла
+add_executable(dekoder
+    main.c
+    h264_decoder.c
+    h264_bitstream.c
+    h264_ps.c
+    h264_slice.c
+    h264_mb.c
+    image_writer.c
+)
+
+# Указание директорий и библиотек
+target_include_directories(dekoder PRIVATE . ${PNG_INCLUDE_DIR} ${JPEG_INCLUDE_DIR})
+target_link_libraries(dekoder PRIVATE pthread ${PNG_LIBRARY} ${JPEG_LIBRARY})

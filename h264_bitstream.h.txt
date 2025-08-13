@@ -1,0 +1,28 @@
+#ifndef H264_BITSTREAM_H
+#define H264_BITSTREAM_H
+
+#include <stdint.h>
+
+// Структура для побитового чтения потока
+typedef struct {
+    const uint8_t* data; // Указатель на данные
+    int size;            // Размер данных в байтах
+    int pos;             // Текущая позиция в битах
+} H264Bitstream;
+
+// Инициализация битстрима
+void h264_bs_init(H264Bitstream* bs, const uint8_t* data, int size);
+
+// Чтение n бит
+uint32_t h264_bs_read_bits(H264Bitstream* bs, int n);
+
+// Чтение экспоненциального кода Голомба (unsigned)
+unsigned int h264_bs_read_ue(H264Bitstream* bs);
+
+// Чтение экспоненциального кода Голомба (signed)
+int h264_bs_read_se(H264Bitstream* bs);
+
+// Пропуск байтов эмуляции
+void h264_bs_skip_emulation_prevention(H264Bitstream* bs);
+
+#endif

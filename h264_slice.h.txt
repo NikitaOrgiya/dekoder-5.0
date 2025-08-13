@@ -1,0 +1,44 @@
+#ifndef H264_SLICE_H
+#define H264_SLICE_H
+
+#include "h264_ps.h"
+#include "h264_mb.h"
+#include "h264_bitstream.h"
+
+// Типы срезов
+typedef enum {
+    SLICE_TYPE_P  = 0,  // P-срез
+    SLICE_TYPE_B  = 1,  // B-срез
+    SLICE_TYPE_I  = 2,  // I-срез
+    SLICE_TYPE_SP = 3,  // SP-срез
+    SLICE_TYPE_SI = 4   // SI-срез
+} SliceType;
+
+// Структура среза
+typedef struct {
+    H264SPS* sps;       // Связанный SPS
+    H264PPS* pps;       // Связанный PPS
+    H264MB* mbs;        // Макроблоки
+    unsigned int num_mbs; // Количество макроблоков
+    SliceType type;     // Тип среза
+    int first_mb_in_slice; // Первый макроблок
+    int frame_num;       // Номер кадра
+    int slice_qp;       // QP среза
+    H264Frame* ref_frames[16]; // Референсные кадры
+    int ref_count;      // Количество референсных кадров
+    int field_pic_flag; // Флаг полевого кодирования
+    int bottom_field_flag; // Флаг нижнего поля
+    int ref_pic_list_modification_flag_l0; // Флаг модификации списка L0
+    int ref_pic_list_modification_flag_l1; // Флаг модификации списка L1
+} H264Slice;
+
+// Инициализация и освобождение среза
+int h264_slice_init(H264Slice* slice);
+void h264_slice_free(H264Slice* slice);
+
+// Парсинг заголовка и данных среза
+int h264_slice_header_parse(H264Slice* slice, const uint8_t* data, int size, H264Decoder* decoder);
+int h264_slice_data_parse(H264Slice* slice, const uint8_t* data, int size, H264Decoder* decoder);
+int h264_decode_slice(H264Decoder* decoder, const uint8_t* data, int size, H264Slice* slice);
+
+#endif

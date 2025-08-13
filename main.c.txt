@@ -1,0 +1,78 @@
+#include "h264_decoder.h"
+#include "image_writer.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+// Точка входа программы
+int main(int argc, char* argv[]) {
+    // Проверка аргументов
+    if (argc != 5) {
+        fprintf(stderr, "Usage: %s <input.h264> <frame_number> <output_file> <format: bmp|png|jpeg>\n", argv[0]);
+        return 1;
+    }
+
+    // Открытие входного файла
+    FILE* input = fopen(argv[1], "rb");
+    if (!input) {
+        fprintf(stderr, "Cannot open input file: %s\n", argv[1]);
+        return 1;
+    }
+
+    // Открытие выходного файла
+    FILE* output = fopen(argv[3], "wb");
+    if (!output) {
+        fprintf(stderr, "Cannot open output file: %s\n", argv[3]);
+        fclose(input);
+        return 1;
+    }
+
+    // Определение формата вывода
+    ImageFormat format;
+    if (strcmp(argv[4], "bmp") == 0) {
+        format = IMAGE_FORMAT_BMP;
+    } else if (strcmp(argv[4], "png") == 0) {
+        format = IMAGE_FORMAT_PNG;
+    } else if (strcmp(argv[4], "jpeg") == 0) {
+        format = IMAGE_FORMAT_JPEG;
+    } else {
+        fprintf(stderr, "Unsupported format: %s\n", argv[4]);
+        fclose(input);
+        fclose(output);
+        return 1;
+    }
+
+    // Инициализация декодера
+    H264Decoder decoder;
+    int res = h264_decoder_init(&decoder, input, output);
+    if (res != H264_OK) {
+        fprintf(stderr, "Failed to initialize decoder\n");
+        fclose(input);
+        fclose(output);
+        return 1;
+    }
+
+    // Получение номера кадра
+    int frame_number = atoi(argv[2]);
+    if (frame_number < 0) {
+        fprintf(stderr, "Invalid frame number: %d\n", frame_number);
+        h264_decoder_free(&decoder);
+        fclose(input);
+        fclose(output);
+        return 1;
+    }
+
+    // Декодирование кадра
+    res = h264_decode_frame(&decoder, frame_number);
+    if (res != H264_OK) {
+        fprintf(stderr, "Failed to decode frame %d\n", frame_number);
+    } else {
+        fprintf(stdout, "Frame %d decoded and saved successfully to %s\n", frame_number, argv[3]);
+    }
+
+    // Очистка и закрытие
+    h264_decoder_free(&decoder);
+    fclose(input);
+    fclose(output);
+    return res == H264_OK ? 0 : 1;
+}

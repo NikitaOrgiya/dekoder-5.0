@@ -1,0 +1,41 @@
+#ifndef H264_MB_H
+#define H264_MB_H
+
+#include "h264_ps.h"
+#include "h264_slice.h"
+#include "h264_bitstream.h"
+
+// Типы макроблоков
+typedef enum {
+    MB_TYPE_I = 0,  // Intra
+    MB_TYPE_P = 1,  // Predicted
+    MB_TYPE_B = 2   // Bi-predicted
+} MacroblockType;
+
+// Структура макроблока
+typedef struct {
+    MacroblockType type; // Тип макроблока
+    int16_t coeffs[16][16]; // Коэффициенты яркости
+    int16_t chroma_cb_coeffs[16][16]; // Коэффициенты хромы Cb
+    int16_t chroma_cr_coeffs[16][16]; // Коэффициенты хромы Cr
+} H264MB;
+
+// Контекст для CABAC
+typedef struct {
+    uint32_t range;     // Диапазон для CABAC
+    uint32_t offset;    // Смещение
+    uint8_t* ctx;       // Контексты
+} H264CABACContext;
+
+// Инициализация и освобождение макроблока
+void h264_mb_init(H264MB* mb);
+void h264_mb_free(H264MB* mb);
+
+// Инициализация и освобождение CABAC
+void h264_cabac_init(H264CABACContext* cabac, const uint8_t* data, int size);
+void h264_cabac_free(H264CABACContext* cabac);
+
+// Декодирование макроблока
+int h264_decode_mb(H264MB* mb, H264Bitstream* bs, H264CABACContext* cabac, H264Slice* slice, H264Decoder* decoder);
+
+#endif

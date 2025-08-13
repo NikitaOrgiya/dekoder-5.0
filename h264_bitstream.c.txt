@@ -1,0 +1,52 @@
+#include "h264_bitstream.h"
+#include <string.h>
+
+// Инициализация битстрима
+void h264_bs_init(H264Bitstream* bs, const uint8_t* data, int size) {
+    bs->data = data;
+    bs->size = size;
+    bs->pos = 0;
+}
+
+// Чтение n бит
+uint32_t h264_bs_read_bits(H264Bitstream* bs, int n) {
+    uint32_t result = 0;
+    for (int i = 0; i < n; i++) {
+        if (bs->pos >= bs->size * 8) return result;
+        int byte_pos = bs->pos / 8;
+        int bit_pos = 7 - (bs->pos % 8);
+        result = (result << 1) | ((bs->data[byte_pos] >> bit_pos) & 1);
+        bs->pos++;
+    }
+    return result;
+}
+
+// Чтение unsigned экспоненциального кода Голомба
+unsigned int h264_bs_read_ue(H264Bitstream* bs) {
+    int leading_zeros = 0;
+    while (bs->pos < bs->size * 8 && h264_bs_read_bits(bs, 1) == 0) {
+        leading_zeros++;
+    }
+    if (leading_zeros >= 32) return 0;
+    uint32_t value = (1 << leading_zeros) - 1 + h264_bs_read_bits(bs, leading_zeros);
+    return value;
+}
+
+// Чтение signed экспоненциального кода Голомба
+int h264_bs_read_se(H264Bitstream* bs) {
+    unsigned int code = h264_bs_read_ue(bs);
+    if (code == 0) return 0;
+    int sign = (code & 1) ? 1 : -1;
+    return sign * ((code + 1) >> 1);
+}
+
+// Пропуск байтов эмуляции (0x000003)
+void h264_bs_skip_emulation_prevention(H264Bitstream* bs) {
+    while (bs->pos / 8 + 2 < bs->size) {
+        if (bs->data[bs->pos / 8] == 0 && bs->data[bs->pos / 8 + 1] == 0 && bs->data[bs->pos / 8 + 2] == 3) {
+            bs->pos += 24; // Пропустить 3 байта
+        } else {
+            break;
+        }
+    }
+}

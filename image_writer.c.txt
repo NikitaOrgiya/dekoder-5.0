@@ -1,0 +1,252 @@
+#include "image_writer.h"
+#include "h264_error.h"
+#include <string.h>
+#include <stdio.h>
+#include <png.h>
+#include <jpeglib.h>
+
+// Конверсия YUV в RGB
+static void yuv_to_rgb(uint8_t y, uint8_t u, uint8_t v, uint8_t* r, uint8_t* g, uint8_t* b) {
+    int c = y - 16;
+    int d = u - 128;
+    int e = v - 128;
+    *r = (298 * c + 409 * e + 128) >> 8;
+    *g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+    *b = (298 * c + 516 * d + 128) >> 8;
+    *r = *r > 255 ? 255 : (*r < 0 ? 0 : *r);
+    *g = *g > 255 ? 255 : (*g < 0 ? 0 : *g);
+    *b = *b > 255 ? 255 : (*b < 0 ? 0 : *b);
+}
+
+// Интерполяция хромы
+static void interpolate_chroma(uint8_t* chroma_out, const uint8_t* chroma_in, int width, int height, int chroma_format_idc) {
+    if (chroma_format_idc == 1) { // 4:2:0
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int chroma_x = x / 2;
+                int chroma_y = y / 2;
+                chroma_out[y * width + x] = chroma_in[chroma_y * (width / 2) + chroma_x];
+            }
+        }
+    } else if (chroma_format_idc == 2) { // 4:2:2
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int chroma_x = x / 2;
+                chroma_out[y * width + x] = chroma_in[y * (width / 2) + chroma_x];
+            }
+        }
+    } else if (chroma_format_idc == 3) { // 4:4:4
+        memcpy(chroma_out, chroma_in, width * height * sizeof(uint8_t));
+    }
+}
+
+// Заголовок BMP
+typedef struct {
+    uint16_t signature;      // 'BM'
+    uint32_t file_size;      // Размер файла
+    uint16_t reserved1;      // Зарезервировано
+    uint16_t reserved2;      // Зарезервировано
+    uint32_t data_offset;    // Смещение данных
+} BMPHeader;
+
+// Информация BMP
+typedef struct {
+    uint32_t header_size;    // Размер заголовка
+    int32_t width;           // Ширина
+    int32_t height;          // Высота
+    uint16_t planes;         // Количество плоскостей
+    uint16_t bits_per_pixel; // Бит на пиксель
+    uint32_t compression;    // Тип сжатия
+    uint32_t image_size;     // Размер изображения
+    int32_t x_pixels_per_meter; // Пикселей на метр по X
+    int32_t y_pixels_per_meter; // Пикселей на метр по Y
+    uint32_t colors_used;    // Количество используемых цветов
+    uint32_t colors_important; // Количество важных цветов
+} BMPInfoHeader;
+
+// Сохранение в BMP
+static int save_frame_to_bmp(const H264Frame* frame, FILE* output, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "save_frame_to_bmp start");
+    if (!frame || !output) return H264_ERROR_INVALID_PARAM;
+    const int width = frame->width;
+    const int height = frame->height;
+    if (width <= 0 || height <= 0) return H264_ERROR_INVALID_PARAM;
+
+    const int bytes_per_pixel = 3;
+    const int row_padding = (4 - (width * bytes_per_pixel) % 4) % 4;
+    const int row_size = width * bytes_per_pixel + row_padding;
+    const int image_size = row_size * height;
+
+    BMPHeader header = {0x4D42, sizeof(BMPHeader) + sizeof(BMPInfoHeader) + image_size, 0, 0, sizeof(BMPHeader) + sizeof(BMPInfoHeader)};
+    BMPInfoHeader info_header = {sizeof(BMPInfoHeader), width, height, 1, bytes_per_pixel * 8, 0, image_size, 2835, 2835, 0, 0};
+
+    if (fwrite(&header, 1, sizeof(header), output) != sizeof(header) ||
+        fwrite(&info_header, 1, sizeof(info_header), output) != sizeof(info_header)) {
+        LOG(decoder, LOG_ERROR, "failed to write BMP header");
+        return H264_ERROR_WRITE_FAILED;
+    }
+
+    uint8_t* row_buffer = malloc(row_size);
+    uint8_t* chroma_cb_full = malloc(width * height);
+    uint8_t* chroma_cr_full = malloc(width * height);
+    if (!row_buffer || !chroma_cb_full || !chroma_cr_full) {
+        free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+
+    interpolate_chroma(chroma_cb_full, frame->chroma_cb, width, height, decoder->sps->chroma_format_idc);
+    interpolate_chroma(chroma_cr_full, frame->chroma_cr, width, height, decoder->sps->chroma_format_idc);
+
+    for (int y = height - 1; y >= 0; y--) {
+        uint8_t* row_ptr = row_buffer;
+        for (int x = 0; x < width; x++) {
+            uint8_t y_val = frame->luma ? frame->luma[y * width + x] : 0;
+            uint8_t u_val = chroma_cb_full[y * width + x];
+            uint8_t v_val = chroma_cr_full[y * width + x];
+            uint8_t r, g, b;
+            yuv_to_rgb(y_val, u_val, v_val, &r, &g, &b);
+            *row_ptr++ = b;
+            *row_ptr++ = g;
+            *row_ptr++ = r;
+        }
+        memset(row_ptr, 0, row_padding);
+        if (fwrite(row_buffer, 1, row_size, output) != row_size) {
+            free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+            return H264_ERROR_WRITE_FAILED;
+        }
+    }
+    free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+    LOG(decoder, LOG_INFO, "BMP saved successfully");
+    return H264_OK;
+}
+
+// Сохранение в PNG
+static int save_frame_to_png(const H264Frame* frame, FILE* output, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "save_frame_to_png start");
+    if (!frame || !output) return H264_ERROR_INVALID_PARAM;
+    const int width = frame->width;
+    const int height = frame->height;
+    if (width <= 0 || height <= 0) return H264_ERROR_INVALID_PARAM;
+
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) return H264_ERROR_WRITE_FAILED;
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_write_struct(&png_ptr, NULL);
+        return H264_ERROR_WRITE_FAILED;
+    }
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        return H264_ERROR_WRITE_FAILED;
+    }
+
+    png_init_io(png_ptr, output);
+    png_set_IHDR(png_ptr, info_ptr, width, height, 8, PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                 PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(png_ptr, info_ptr);
+
+    uint8_t* row_buffer = malloc(width * 3);
+    uint8_t* chroma_cb_full = malloc(width * height);
+    uint8_t* chroma_cr_full = malloc(width * height);
+    if (!row_buffer || !chroma_cb_full || !chroma_cr_full) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+
+    interpolate_chroma(chroma_cb_full, frame->chroma_cb, width, height, decoder->sps->chroma_format_idc);
+    interpolate_chroma(chroma_cr_full, frame->chroma_cr, width, height, decoder->sps->chroma_format_idc);
+
+    for (int y = 0; y < height; y++) {
+        uint8_t* row_ptr = row_buffer;
+        for (int x = 0; x < width; x++) {
+            uint8_t y_val = frame->luma ? frame->luma[y * width + x] : 0;
+            uint8_t u_val = chroma_cb_full[y * width + x];
+            uint8_t v_val = chroma_cr_full[y * width + x];
+            uint8_t r, g, b;
+            yuv_to_rgb(y_val, u_val, v_val, &r, &g, &b);
+            *row_ptr++ = r;
+            *row_ptr++ = g;
+            *row_ptr++ = b;
+        }
+        png_write_row(png_ptr, row_buffer);
+    }
+
+    png_write_end(png_ptr, NULL);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+    free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+    LOG(decoder, LOG_INFO, "PNG saved successfully");
+    return H264_OK;
+}
+
+// Сохранение в JPEG
+static int save_frame_to_jpeg(const H264Frame* frame, FILE* output, H264Decoder* decoder) {
+    LOG(decoder, LOG_DEBUG, "save_frame_to_jpeg start");
+    if (!frame || !output) return H264_ERROR_INVALID_PARAM;
+    const int width = frame->width;
+    const int height = frame->height;
+    if (width <= 0 || height <= 0) return H264_ERROR_INVALID_PARAM;
+
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, output);
+
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 90, TRUE);
+
+    jpeg_start_compress(&cinfo, TRUE);
+
+    uint8_t* row_buffer = malloc(width * 3);
+    uint8_t* chroma_cb_full = malloc(width * height);
+    uint8_t* chroma_cr_full = malloc(width * height);
+    if (!row_buffer || !chroma_cb_full || !chroma_cr_full) {
+        jpeg_destroy_compress(&cinfo);
+        free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+
+    interpolate_chroma(chroma_cb_full, frame->chroma_cb, width, height, decoder->sps->chroma_format_idc);
+    interpolate_chroma(chroma_cr_full, frame->chroma_cr, width, height, decoder->sps->chroma_format_idc);
+
+    JSAMPROW row_pointer[1];
+    for (int y = 0; y < height; y++) {
+        uint8_t* row_ptr = row_buffer;
+        for (int x = 0; x < width; x++) {
+            uint8_t y_val = frame->luma ? frame->luma[y * width + x] : 0;
+            uint8_t u_val = chroma_cb_full[y * width + x];
+            uint8_t v_val = chroma_cr_full[y * width + x];
+            uint8_t r, g, b;
+            yuv_to_rgb(y_val, u_val, v_val, &r, &g, &b);
+            *row_ptr++ = r;
+            *row_ptr++ = g;
+            *row_ptr++ = b;
+        }
+        row_pointer[0] = row_buffer;
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    free(row_buffer); free(chroma_cb_full); free(chroma_cr_full);
+    LOG(decoder, LOG_INFO, "JPEG saved successfully");
+    return H264_OK;
+}
+
+// Сохранение кадра в указанный формат
+int save_frame_to_image(const H264Frame* frame, FILE* output, ImageFormat format, H264Decoder* decoder) {
+    switch (format) {
+        case IMAGE_FORMAT_BMP: return save_frame_to_bmp(frame, output, decoder);
+        case IMAGE_FORMAT_PNG: return save_frame_to_png(frame, output, decoder);
+        case IMAGE_FORMAT_JPEG: return save_frame_to_jpeg(frame, output, decoder);
+        default:
+            LOG(decoder, LOG_ERROR, "unsupported image format");
+            return H264_ERROR_INVALID_PARAM;
+    }
+}

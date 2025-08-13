@@ -1,0 +1,172 @@
+#include "h264_ps.h"
+#include "h264_bitstream.h"
+#include "h264_error.h"
+#include "h264_decoder.h"
+#include <string.h>
+#include <stdio.h>
+
+// Инициализация SPS
+void h264_sps_init(H264SPS* sps) {
+    if (!sps) return;
+    memset(sps, 0, sizeof(H264SPS));
+}
+
+// Освобождение SPS
+void h264_sps_free(H264SPS* sps) {
+    if (!sps) return;
+    memset(sps, 0, sizeof(H264SPS));
+}
+
+// Парсинг SPS
+int h264_decode_sps(H264Decoder* decoder, const uint8_t* data, int size) {
+    LOG(decoder, LOG_DEBUG, "h264_decode_sps start: size=%d", size);
+    if (!decoder || !data || size <= 0) {
+        LOG(decoder, LOG_ERROR, "invalid params");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    H264Bitstream bs;
+    h264_bs_init(&bs, data, size);
+    H264SPS* sps = (H264SPS*)malloc(sizeof(H264SPS));
+    if (!sps) {
+        LOG(decoder, LOG_ERROR, "out of memory for SPS");
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+    h264_sps_init(sps);
+    sps->profile_idc = h264_bs_read_bits(&bs, 8);
+    h264_bs_read_bits(&bs, 8); // constraint_set_flags and reserved_zero
+    sps->level_idc = h264_bs_read_bits(&bs, 8);
+    sps->seq_parameter_set_id = h264_bs_read_ue(&bs);
+    if (sps->profile_idc >= 100) {
+        sps->chroma_format_idc = h264_bs_read_ue(&bs);
+        if (sps->chroma_format_idc == 3) {
+            h264_bs_read_bits(&bs, 1); // separate_colour_plane_flag
+        }
+        h264_bs_read_ue(&bs); // bit_depth_luma_minus8
+        h264_bs_read_ue(&bs); // bit_depth_chroma_minus8
+        h264_bs_read_bits(&bs, 1); // qpprime_y_zero_transform_bypass_flag
+        if (h264_bs_read_bits(&bs, 1)) { // seq_scaling_matrix_present_flag
+            for (int i = 0; i < 8; i++) {
+                if (h264_bs_read_bits(&bs, 1)) { // seq_scaling_list_present_flag
+                    for (int j = 0; j < (i < 6 ? 16 : 64); j++) {
+                        h264_bs_read_se(&bs); // scaling_list
+                    }
+                }
+            }
+        }
+    } else {
+        sps->chroma_format_idc = 1; // По умолчанию 4:2:0
+    }
+    sps->log2_max_frame_num_minus4 = h264_bs_read_ue(&bs);
+    sps->pic_order_cnt_type = h264_bs_read_ue(&bs);
+    if (sps->pic_order_cnt_type == 0) {
+        sps->log2_max_pic_order_cnt_lsb_minus4 = h264_bs_read_ue(&bs);
+    } else if (sps->pic_order_cnt_type == 1) {
+        h264_bs_read_bits(&bs, 1); // delta_pic_order_always_zero_flag
+        h264_bs_read_se(&bs); // offset_for_non_ref_pic
+        h264_bs_read_se(&bs); // offset_for_top_to_bottom_field
+        int num_ref_frames_in_pic_order_cnt_cycle = h264_bs_read_ue(&bs);
+        for (int i = 0; i < num_ref_frames_in_pic_order_cnt_cycle; i++) {
+            h264_bs_read_se(&bs); // offset_for_ref_frame
+        }
+    }
+    sps->max_num_ref_frames = h264_bs_read_ue(&bs);
+    h264_bs_read_bits(&bs, 1); // gaps_in_frame_num_value_allowed_flag
+    sps->pic_width_in_mbs_minus1 = h264_bs_read_ue(&bs);
+    sps->pic_height_in_map_units_minus1 = h264_bs_read_ue(&bs);
+    sps->frame_mbs_only_flag = h264_bs_read_bits(&bs, 1);
+    if (sps->frame_mbs_only_flag == 0) {
+        sps->mb_adaptive_frame_field_flag = h264_bs_read_bits(&bs, 1);
+    } else {
+        sps->mb_adaptive_frame_field_flag = 0;
+    }
+    h264_bs_read_bits(&bs, 1); // direct_8x8_inference_flag
+    if (h264_bs_read_bits(&bs, 1)) { // frame_cropping_flag
+        h264_bs_read_ue(&bs); // frame_crop_left_offset
+        h264_bs_read_ue(&bs); // frame_crop_right_offset
+        h264_bs_read_ue(&bs); // frame_crop_top_offset
+        h264_bs_read_ue(&bs); // frame_crop_bottom_offset
+    }
+    // Парсинг VUI
+    if (h264_bs_read_bits(&bs, 1)) { // vui_parameters_present_flag
+        sps->vui.aspect_ratio_info_present_flag = h264_bs_read_bits(&bs, 1);
+        if (sps->vui.aspect_ratio_info_present_flag) {
+            sps->vui.aspect_ratio_idc = h264_bs_read_bits(&bs, 8);
+            if (sps->vui.aspect_ratio_idc == 255) { // Extended_SAR
+                sps->vui.sar_width = h264_bs_read_bits(&bs, 16);
+                sps->vui.sar_height = h264_bs_read_bits(&bs, 16);
+            }
+        }
+        sps->vui.timing_info_present_flag = h264_bs_read_bits(&bs, 1);
+        if (sps->vui.timing_info_present_flag) {
+            sps->vui.num_units_in_tick = h264_bs_read_bits(&bs, 32);
+            sps->vui.time_scale = h264_bs_read_bits(&bs, 32);
+            sps->vui.fixed_frame_rate_flag = h264_bs_read_bits(&bs, 1);
+        }
+        sps->vui.colour_description_present_flag = h264_bs_read_bits(&bs, 1);
+        if (sps->vui.colour_description_present_flag) {
+            sps->vui.colour_primaries = h264_bs_read_bits(&bs, 8);
+            sps->vui.transfer_characteristics = h264_bs_read_bits(&bs, 8);
+            sps->vui.matrix_coefficients = h264_bs_read_bits(&bs, 8);
+        }
+    }
+    pthread_mutex_lock(&decoder->mutex);
+    if (decoder->sps) {
+        h264_sps_free(decoder->sps);
+        free(decoder->sps);
+    }
+    decoder->sps = sps;
+    pthread_mutex_unlock(&decoder->mutex);
+    LOG(decoder, LOG_INFO, "SPS decoded: profile_idc=%u, seq_parameter_set_id=%u, chroma_format_idc=%u", 
+        sps->profile_idc, sps->seq_parameter_set_id, sps->chroma_format_idc);
+    return H264_OK;
+}
+
+// Инициализация PPS
+void h264_pps_init(H264PPS* pps) {
+    if (!pps) return;
+    memset(pps, 0, sizeof(H264PPS));
+}
+
+// Освобождение PPS
+void h264_pps_free(H264PPS* pps) {
+    if (!pps) return;
+    memset(pps, 0, sizeof(H264PPS));
+}
+
+// Парсинг PPS
+int h264_decode_pps(H264Decoder* decoder, const uint8_t* data, int size) {
+    LOG(decoder, LOG_DEBUG, "h264_decode_pps start: size=%d", size);
+    if (!decoder || !data || size <= 0) {
+        LOG(decoder, LOG_ERROR, "invalid params");
+        return H264_ERROR_INVALID_PARAM;
+    }
+    H264Bitstream bs;
+    h264_bs_init(&bs, data, size);
+    H264PPS* pps = (H264PPS*)malloc(sizeof(H264PPS));
+    if (!pps) {
+        LOG(decoder, LOG_ERROR, "out of memory for PPS");
+        return H264_ERROR_OUT_OF_MEMORY;
+    }
+    h264_pps_init(pps);
+    pps->pic_parameter_set_id = h264_bs_read_ue(&bs);
+    pps->seq_parameter_set_id = h264_bs_read_ue(&bs);
+    pps->entropy_coding_mode_flag = h264_bs_read_bits(&bs, 1);
+    pps->pic_order_present_flag = h264_bs_read_bits(&bs, 1);
+    pps->num_ref_idx_l0_default_active_minus1 = h264_bs_read_ue(&bs);
+    pps->num_ref_idx_l1_default_active_minus1 = h264_bs_read_ue(&bs);
+    pps->weighted_pred_flag = h264_bs_read_bits(&bs, 1);
+    pps->weighted_bipred_idc = h264_bs_read_bits(&bs, 2);
+    pps->pic_init_qp_minus26 = h264_bs_read_se(&bs);
+    pps->pic_init_qs_minus26 = h264_bs_read_se(&bs);
+    pps->chroma_qp_index_offset = h264_bs_read_se(&bs);
+    pthread_mutex_lock(&decoder->mutex);
+    if (decoder->pps) {
+        h264_pps_free(decoder->pps);
+        free(decoder->pps);
+    }
+    decoder->pps = pps;
+    pthread_mutex_unlock(&decoder->mutex);
+    LOG(decoder, LOG_INFO, "PPS decoded: pic_parameter_set_id=%u, entropy_coding_mode_flag=%u", 
+        pps->pic_parameter_set_id, pps->entropy_coding_mode_flag);
+    return H264_OK;
+}
